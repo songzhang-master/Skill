@@ -1,0 +1,4 @@
+interface:
+  display_name: "Auto Imagery Download"
+  short_description: "Download imagery using a DEM or longitude/latitude bounds."
+  default_prompt: "Use $auto-imagery-download to download imagery using my DEM/reference raster, or longitude/latitude bounds and an output resolution if I have no DEM."
