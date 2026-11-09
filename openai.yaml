@@ -1,4 +1,4 @@
 interface:
-  display_name: "Auto Imagery Download"
-  short_description: "Download imagery using a DEM or longitude/latitude bounds."
-  default_prompt: "Use $auto-imagery-download to download imagery using my DEM/reference raster, or longitude/latitude bounds and an output resolution if I have no DEM."
+  display_name: "遥感底图下载"
+  short_description: "按中文参数表下载指定范围的 RGB 影像，核验来源、日期条件、网格与成果。"
+  default_prompt: "使用 $auto-imagery-download，按随附参数下载影像。成像日期填写 YYYY-MM-DD。先查目标日，当天没有可核验并可下载的影像时，每次向前推 1 天，最多回溯 15 天（含第 15 天）。取最近一个满足条件且下载成功的成像日，核验通过后停止。逐日匹配时保留原范围和分辨率。返回成果路径、目标日期、实际成像日期和回溯天数。整个窗口都未命中时，报告起止日期和原因；查询故障或下载失败时，报告相应错误。"

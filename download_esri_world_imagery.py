@@ -9,19 +9,21 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from imagery_sources import ESRI_EXPORT, open_source
+
 from osgeo import gdal
 
 gdal.UseExceptions()
 
-DEFAULT_SERVICE = "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reference-raster", required=True, help="North-up EPSG:3857 reference GeoTIFF")
     parser.add_argument("--out", required=True, help="New output RGB GeoTIFF; existing files are refused")
+    parser.add_argument("--max-blocks", type=int, help="Optional limit on source blocks or tiles")
     parser.add_argument("--work-dir", required=True, help="Temporary JPG/VRT directory, outside final output directory")
-    parser.add_argument("--service-url", default=DEFAULT_SERVICE, help="ArcGIS MapServer export endpoint")
+    parser.add_argument("--service-url", default=ESRI_EXPORT, choices=[ESRI_EXPORT], help="ArcGIS MapServer export endpoint")
     parser.add_argument("--block-size", type=int, default=2048, help="Export block side in pixels; default is 2048")
     return parser.parse_args()
 
@@ -44,7 +46,7 @@ def download(url: str, target: Path, width: int, height: int) -> None:
     for attempt in range(4):
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "Codex-GIS/1.0"})
-            with urllib.request.urlopen(request, timeout=180) as response, target.open("wb") as stream:
+            with open_source("esri", request, timeout=180) as response, target.open("wb") as stream:
                 shutil.copyfileobj(response, stream)
             if valid_image(target, width, height):
                 return
@@ -73,6 +75,8 @@ def write_vrt(vrt: Path, sources: list[tuple[Path, int, int, int, int]], cols: i
         stream.write(f'  <GeoTransform>{gt[0]}, {gt[1]}, 0, {gt[3]}, 0, {gt[5]}</GeoTransform>\n')
         for band in range(1, 4):
             stream.write(f'  <VRTRasterBand dataType="Byte" band="{band}">\n')
+            color = ("Red", "Green", "Blue")[band - 1]
+            stream.write(f"    <ColorInterp>{color}</ColorInterp>\n")
             for tile, xoff, yoff, width, height in sources:
                 name = str(tile).replace("&", "&amp;")
                 stream.write("    <SimpleSource>\n")
@@ -98,6 +102,9 @@ def main() -> None:
     gt, projection = validate_reference(source)
     cols, rows = source.RasterXSize, source.RasterYSize
     work.mkdir(parents=True, exist_ok=True)
+    total = ((cols + args.block_size - 1) // args.block_size) * ((rows + args.block_size - 1) // args.block_size)
+    if args.max_blocks is not None and total > args.max_blocks:
+        raise ValueError(f"BLOCK_LIMIT：需要 {total} 个分块，上限为 {args.max_blocks}。")
     tiles: list[tuple[Path, int, int, int, int]] = []
     for yoff in range(0, rows, args.block_size):
         height = min(args.block_size, rows - yoff)
@@ -110,7 +117,7 @@ def main() -> None:
                 query = urllib.parse.urlencode({
                     "bbox": f"{xmin:.8f},{ymin:.8f},{xmax:.8f},{ymax:.8f}",
                     "bboxSR": "3857", "imageSR": "3857", "size": f"{width},{height}",
-                    "format": "jpg", "transparent": "false", "f": "image",
+                    "format": "jpg", "transparent": "false", "dpi": "96", "f": "image",
                 })
                 print(f"Download x={xoff}, y={yoff}, {width}x{height}", flush=True)
                 download(f"{args.service_url}?{query}", tile, width, height)
@@ -122,7 +129,7 @@ def main() -> None:
     write_vrt(vrt, tiles, cols, rows, gt, projection)
     out.parent.mkdir(parents=True, exist_ok=True)
     gdal.Translate(str(out), str(vrt), format="GTiff", creationOptions=[
-        "TILED=YES", "COMPRESS=DEFLATE", "PREDICTOR=2", "BIGTIFF=IF_SAFER", "INTERLEAVE=PIXEL", "TFW=YES"
+        "TILED=YES", "COMPRESS=DEFLATE", "PREDICTOR=2", "BIGTIFF=IF_SAFER", "INTERLEAVE=PIXEL", "PHOTOMETRIC=RGB", "TFW=YES"
     ])
     result = gdal.Open(str(out))
     report = {

@@ -1,96 +1,74 @@
 ---
 name: auto-imagery-download
-description: 按 DEM/参考栅格，或按经纬度范围和输出分辨率，下载 Esri、EOX 或 Bing RGB 底图影像并生成 EPSG:3857 GeoTIFF。适用于已有栅格配图或无 DEM 的区域影像获取。
+description: 按固定参数表从 Esri World Imagery、EOX Sentinel-2 cloudless 或 Bing 航空底图下载 EPSG:3857 RGB GeoTIFF。支持 WGS84 范围或参考栅格；按具体目标日向前最多回溯 15 天，核验成像日期及区域覆盖。
 ---
 
-# 按 DEM 或经纬度范围下载影像
+# 下载影像
 
-统一入口为 `scripts/download_imagery.py`，提供两个互斥输入选项：
+## 来源和日期边界
 
-1. **有 DEM/参考栅格**：传入 `--reference-raster`，直接沿用其范围、像元大小、行列数和网格位置。参考文件须为北向上 EPSG:3857；其他 CRS 需要先重投影为另一个文件。不修改输入文件。
-2. **没有 DEM**：传入 `--bbox 西经度 南纬度 东经度 北纬度` 和 `--resolution 米/像元`，自动建立 EPSG:3857 虚拟参考网格并下载。输入为 WGS84 十进制度，西经/南纬用负数；经纬度顺序不能颠倒。
+只在下表列出的接口内检索、下载影像。即使某个外部资源能满足日期或清晰度要求，也须停止并报告当前来源的限制。不得打开其他目录服务、搜索引擎、第三方接口或另写下载器绕过限制；不得从上次任务的文件中取图冒充本次下载。技能中引用的背景文档、Google 旧瓦片地址均不构成可下载来源。扩大清单属于修改技能的独立任务。
 
-两种模式都需要数据源 `--source esri|eox|bing`、成果路径 `--out` 和缓存目录 `--work-dir`。按用户已经提供的信息选择模式；如果缺少数据源、范围或 bbox 模式的分辨率，只询问缺失项，不要求没有 DEM 的用户提供 DEM。参考栅格模式禁止再指定 `--resolution`，以保证原网格不变。Bing 还必须指定 `--zoom`；EOX 默认使用第 13 级。
+| 已列入清单的影像产品 | 下载与核验范围 | 日级能力 |
+|---|---|---|
+| Esri World Imagery | 影像仍只从原有 [MapServer/export](https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export) 导出。拍摄日期只读同一 [MapServer](https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer) 的服务目录及第 5–18 层中的适用 /query 元数据。 | 核验当前底图在实际比例尺上的成像日期和全范围覆盖。不可任意调取历史版本 |
+| EOX Sentinel-2 cloudless | 同一主机上由[能力文档](https://tiles.maps.eox.at/wmts/1.0.0/WMTSCapabilities.xml)列出的 EPSG:3857 年度 cloudless JPEG 图层 | 年度合成，跳过日级匹配 |
+| Bing 航空影像 | 固定 QuadKey 接口 http://ecn.t3.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1 | 当前接口无区域单日成像凭据，跳过日级匹配 |
 
-经纬度模式保持指定的方形像元大小，向外扩展不足一个像元以覆盖完整范围；通常扩展东、南边界，世界边缘附近改为西、北边界。报告实际输出范围及行列数，不声称边界与输入小数坐标完全一致。`--resolution` 是 EPSG:3857 地图坐标中的米，不是各纬度处恒定的地面距离，也不表示源影像原生分辨率。纬度须在约 ±85.0511287798066° 内，且西 < 东、南 < 北；跨越 ±180° 的区域先拆成两块。
+### 固定的日期回溯规则
 
-先添加 `--dry-run` 检查实际范围、行列数、未压缩 RGB 字节数和执行命令；它不联网、不创建文件。确认参数正确后使用相同命令去掉 `--dry-run` 执行，不额外引入确认步骤。bbox 预览只需要 Python；正式下载和参考栅格预览需要该 Python 环境安装 GDAL Python 绑定（`osgeo`）。根据当前机器选择可用环境，不照搬其他用户的解释器路径。
+1. 标准表单必须填写有效日历日期 YYYY-MM-DD。来源由技能确定。以目标日为第 0 天，依次检查第 0、1、…、15 天前的日期，跨月、跨年和闰日按日历计算。例：2026-10-08 至 2026-09-23，含两端。
+2. 同一范围和网格贯穿全部候选日期。Esri 以 96 DPI 导出的实际比例尺选择拍摄日期元数据层；日级流程使用正方形投影像元。一次区域查询可供整个窗口比对。读取相交记录集、日期字段和覆盖多边形；只有完整输出网格被覆盖，且相交记录的日期一致、有效时，才允许匹配。混合日期、空日期、年度标记、产品发布日期和下载时间均不能证明单日成像。
+3. 从近到远比较，命中后实际下载。影像及元数据均经核验后停止，返回目标日、实际成像日、相差天数及成果路径。下载失败时沿用有限重试；仍失败则继续比较更早候选日。遇到同名文件、输入错误或无法查询元数据，应报告实际原因。
+4. 窗口内无可核验匹配时返回 NO_VERIFIABLE_IMAGE，并列出检查过的日期及元数据依据。下载失败与元数据服务故障分别报告。禁止扩大窗口、变更空间范围、更换未列出的产品、将同一张底图反复下载或标成不同日期。当前接口没有每日历史档案，未匹配只代表这些产品无法提供符合条件的影像。
 
-以下命令在本 skill 目录下执行；`python` 应为已启用 GDAL 的 Python。经纬度仅为用法示例。
+## 固定提示词与参数
 
-```powershell
-# 选项一：有 DEM，直接按其网格下载
-python scripts/download_imagery.py --source esri `
-  --reference-raster "D:\data\area_dem_3857_30m.tif" `
-  --out "D:\data\area_esri.tif" --work-dir "D:\task\imagery_cache"
+使用以下固定提示词，后接[参数模板](request.example.json)，也可以附上已填好的 JSON 文件。
 
-# 选项二：没有 DEM，输入西、南、东、北和目标网格大小
-python scripts/download_imagery.py --source esri `
-  --bbox 103.80 1.25 103.90 1.35 --resolution 30 `
-  --out "D:\data\area_esri_bbox.tif" --work-dir "D:\task\imagery_cache" `
-  --dry-run
-```
+> 使用 $auto-imagery-download，按随附参数下载影像。
+> 成像日期填写 YYYY-MM-DD。先查目标日，当天没有可核验并可下载的影像时，每次向前推 1 天，最多回溯 15 天（含第 15 天）。
+> 取最近一个满足条件且下载成功的成像日，核验通过后停止。逐日匹配时保留原范围和分辨率。
+> 返回成果路径、目标日期、实际成像日期和回溯天数。整个窗口都未命中时，报告起止日期和原因；查询故障或下载失败时，报告相应错误。
 
-EOX 使用同样的两种输入选项，将 `--source` 改为 `eox`，可加 `--layer s2cloudless-2025_3857 --zoom 13 --raw-vrt "D:\data\raw\area_eox.vrt"`；不指定 `--raw-vrt` 时原始瓦片 VRT 保存在工作目录。Bing 将 `--source` 改为 `bing` 并加 `--zoom 15`（示例级别，按需求选择）。每次使用不同的输出文件名。
+表单是 UTF-8 JSON，只改参数值。模板中的 2026-10-08、10 米和路径都是示例，不代替用户缺失的选择。所有路径填本机绝对路径，Windows 示例用正斜杠；数字不加单位，日期加双引号。常规任务使用以下字段。
 
-统一入口按来源、网格和来源参数隔离缓存，避免不同区域错误复用 Esri 分块。bbox 模式在缓存中生成的 `bbox_reference.vrt` 只描述网格，不是 DEM，也不包含高程或遥感像元。三种来源仍调用下面的现有下载脚本；原有 `--reference-raster` 命令继续可用，最终 GeoTIFF、`.tfw` 和 EOX 原始 VRT 都拒绝覆盖。
+| 字段 | 填写规则 |
+|---|---|
+| 成像日期、输出目录 | 必填。成像日期按 YYYY-MM-DD 填写。输出目录由用户选择，文件名由程序生成 |
+| 范围、分辨率 | 经纬度模式同时填写。范围依次为西、南、东、北，WGS84 十进制度。分辨率是 EPSG:3857 地图米/像元。更细的网格不会增加原始影像细节 |
+| 参考栅格 | 有参考栅格时，用这个字段替换“范围”和“分辨率”。填写本地北向上 EPSG:3857 栅格，沿用其网格。参考文件只读 |
 
-## Esri World Imagery
+Bing 自动选择使源瓦片的投影米/像元小于或等于目标像元尺寸的最低级别，超出支持范围时使用最近端点。非正方形参考像元取较细的一边。EOX 默认 13 级，Esri 默认每块 2048 像素。分块数量与输出像元总数由程序预估，常规提示词省略规模上限。
 
-1. 检查参考栅格为北向上、EPSG:3857；记录范围、像元大小、行列数和 CRS。
-2. 将成果写到用户指定目录，临时分块写到任务工作目录或 `--work-dir`，不要混入成果目录。
-3. 默认使用 2048 像素分块。服务声明单次可达 4096，但高纹理区域较容易超时；除非用户明确要求并接受重试风险，不要调到 4096。
-4. 脚本调用 `World_Imagery/MapServer/export`，逐块传入 `bbox`、`bboxSR=3857`、`imageSR=3857`、实际块尺寸与 `f=image`，下载 JPG 后组装为 GeoTIFF。
-5. 检查结果为三波段 `Byte RGB`，范围、行列数、仿射变换和 CRS 与参考栅格一致，并有同名 `.tfw`。默认不创建金字塔。
+常规对话也按同一表单执行。只整理用户给出的参数。有缺项时合并询问一次，网格模式二选一；不推测日期、分辨率或输出位置。收到成像日后优先检查来源能力。遇到未知字段、无效值或重复键，指出具体字段并停止。
 
-```powershell
-python scripts/download_esri_world_imagery.py `
-  --reference-raster "D:\data\area_dem_3857_30m.tif" `
-  --out "D:\data\area_EsriWorldImagery3857_30m_Byte.tif" `
-  --work-dir "D:\task\esri_imagery_work"
-```
+## 执行顺序
 
-## Bing 航空影像
+1. 从技能目录运行根目录的 download_imagery.py。已附 JSON 时直接读取；粘贴 JSON 时原样写到任务工作目录的 UTF-8 文件。同一任务的预检和正式下载必须使用同一份参数。不得改写技能内置模板来保存个人任务。
+2. 使用下列命令离线预检。检查请求范围、实际投影边界、行列数、像元总数、未压缩 RGB 字节数、预计分块或瓦片数、源图层及输出路径。预检不查询图层是否已发布。经纬度模式只需 Python；参考栅格预检和正式下载需同一个已安装 GDAL Python 绑定的环境。bbox 须在 Web Mercator 范围内，经纬度严格递增；跨越 ±180° 的区域须分作两个任务。
+3. 预检通过且用户要求下载，去掉 --dry-run 执行。只要求预览时到此结束。单项预检未通过时记录原因；其余可执行项照常处理。EOX 在下载瓦片前以指定年份核对能力文档、JPEG、矩阵集和级别。服务失败按脚本已有的有限次数重试；重试耗尽即结束。
+4. 以统一入口的最终状态为准。日级任务只发布核验通过的结果。程序先在临时位置写入，再重新打开栅格核验 CRS、网格、行列数、三个 Byte 波段、TFW 的坐标以及像元可读性。抽样单色时转述质检提示。底图可能含云、接缝或空白，抽样结果不能证明全图无云。
+5. 成功时返回 GeoTIFF、世界文件和同名 JSON 记录的路径，简述来源、时间性质、输出网格和警示。日级成功记录中 requested_date、acquisition_date、lookback_days、checked_dates 和 date_evidence 分别记录目标日、实际成像日、回溯天数、已检查日期及元数据依据。completed_utc 为任务完成时间。EOX 保留原始瓦片和原网格 VRT，移动 VRT 时须保留它与缓存的相对位置。
 
-使用用户提供的瓦片模板：`http://ecn.t3.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1`。`q` 是 QuadKey；脚本根据 EPSG:3857 参考范围、指定缩放级别和 256×256 瓦片矩阵计算所需瓦片，只顺序请求覆盖范围内的瓦片，再按参考栅格网格输出 RGB GeoTIFF。缩放级别控制源瓦片网格，输出网格仍以参考栅格为准，不代表影像原生分辨率。
-
-```powershell
-python scripts/download_bing_imagery.py `
-  --reference-raster "D:\data\area_dem_3857_30m.tif" `
-  --out "D:\data\area_Bing_3857_30m.tif" `
-  --work-dir "D:\task\bing_imagery_work" `
-  --zoom 15
-```
-
-脚本会在 `--work-dir` 中保留原始 JPEG 缓存和 VRT，以便复用或重建。只请求覆盖参考范围的瓦片，顺序下载并遵守服务端访问限制。Bing QuadKey 由瓦片 XYZ 坐标交织计算；细节见 [Microsoft Bing Maps Tile System](https://learn.microsoft.com/bingmaps/articles/bing-maps-tile-system/)。
-
-## Google 卫星瓦片 URL
-
-用户给出的旧式 URL 模板为：`http://www.google.cn/maps/vt?lyrs=s@189&gl=cn&x={x}&y={y}&z={z}`。可用单张瓦片检查 URL 是否响应 JPEG，但不要将该旧式地址用于批量瓦片缓存或离线 GeoTIFF 导出。Google 官方卫星瓦片接口使用 Map Tiles API，需要 API key 和会话令牌；其政策也限制预取、缓存和离线用途。参见 [Satellite tiles](https://developers.google.com/maps/documentation/tile/satellite) 与 [Map Tiles API Policies](https://developers.google.com/maps/documentation/tile/policies)。
-
-## EOX Sentinel-2 cloudless WMTS
-
-能力文档：<https://tiles.maps.eox.at/wmts/1.0.0/WMTSCapabilities.xml>。先根据用户指定年份和能力文档选图层；当前 2025 年 EPSG:3857 图层为 `s2cloudless-2025_3857`，格式为 `image/jpeg`，提供 `GoogleMapsCompatible` 与 `g` 两个 Web Mercator 瓦片矩阵集。默认优先使用 `GoogleMapsCompatible`。脚本默认下载第 13 级原始瓦片；若用户指定其他级别，使用其明确值。
-
-`s2cloudless` 是 EOX 发布的 Sentinel-2 无云合成底图，不是可逐景下载的 Sentinel-2 原始波段产品。WMTS 瓦片是 JPEG 显示影像。第 13 级在赤道处约为 19.11 米/像元地图分辨率，地面分辨率随纬度变化；不能称为 30 米原生影像。脚本保留原始 JPEG 瓦片，并生成未重采样的瓦片级 `.vrt`；另外按参考 GeoTIFF 的范围和行列数双线性重采样，写出最终对齐 GeoTIFF。两类成果分开保存。
+在 Windows 上优先运行以下命令。它自动在当前 Python 和已登记的 Conda 环境中选择可用的 GDAL，依次预检和下载。只预检时加 -Preview；已有指定环境时用 -Python 传解释器路径。
 
 ```powershell
-python scripts/download_eox_wmts.py `
-  --reference-raster "D:\data\area_dem_3857_30m.tif" `
-  --raw-vrt "D:\data\raw\s2cloudless_2025_z13.vrt" `
-  --out "D:\data\aligned\s2cloudless_2025_3857_30m.tif" `
-  --work-dir "D:\task\eox_wmts_tiles"
+.\run_download.ps1 -Request "D:/任务/参数.json"
 ```
 
-默认图层为 `s2cloudless-2025_3857`，默认瓦片矩阵为 `GoogleMapsCompatible`，默认级别为 `13`。使用其他年份时，先从能力文档确认对应的 `_3857` 图层及其矩阵集，再通过 `--layer` 指定；不要把 EPSG:4326 的 `WGS84` 矩阵集直接用于 EPSG:3857 瓦片请求。
+直接使用 Python 时，在技能目录运行：
 
-脚本顺序请求瓦片并使用重试，缓存目录可供中断后续跑。保留 `--work-dir` 中的 JPEG 瓦片，因为 `.vrt` 通过相对路径引用它们；移动原始 VRT 时一并保留瓦片缓存或重新生成 VRT。最终栅格检查三波段 `Byte RGB`、EPSG:3857、像元网格、范围和行列数与参考栅格一致，并有同名 `.tfw`。默认不创建金字塔。
+```powershell
+python download_imagery.py --request "D:/任务/参数.json" --dry-run
+python download_imagery.py --request "D:/任务/参数.json"
+```
 
-## 约束与风险
+标准表单统一填写具体日期。已有需要年度合成或不限时间底图的工作流可通过下述命令行旧模式执行。保留直接命令行调用方式。使用 --bbox 西 南 东 北 --resolution 数值 或 --reference-raster 路径，传入 --source；输出可用 --output-dir 目录，或 --out 文件 --work-dir 缓存目录。指定时间时必须传 --date。旧命令省略 --date 表示时间不限。EOX 高级参数保留 --layer、--tile-matrix-set、--zoom、--raw-vrt；Esri 保留 --block-size。Esri 导出接口、EOX 能力文档和 Bing 瓦片模板均仅接受清单中的固定值。三个来源脚本供统一入口内部使用。
 
-- Esri World Imagery 走其正式导出接口；不要用海量 XYZ 瓦片绕开服务限制，保持顺序请求和脚本默认重试。
-- EOX WMTS 只下载覆盖参考范围所需的瓦片；缩放级别越高，请求数越多。尊重服务端访问限制，顺序请求。
-- EOX 原始 `.vrt` 表示所选 WMTS 级别的瓦片网格；只有最终对齐 GeoTIFF 才对应参考栅格分辨率。保留 JPEG 缓存以便重建 VRT，不要将其描述为无损 Sentinel-2 原始数据。
-- 输出 30 m 只表示栅格使用 30 m 网格，不代表 Esri、EOX 或 Bing 源影像处处具有 30 m 原生分辨率。
-- 成果会保留源影像中的云、镶嵌差异、NoData、接缝或空白瓦片；下载后检查预览，不能把服务端影像瑕疵归因于本地拼接。
-- 最终影像使用 `DEFLATE + PREDICTOR=2`、`TILED=YES`、`BIGTIFF=IF_SAFER`，并写出 `.tfw`。
+## 文件与失败处理
+
+- 输出以来源或图层和网格参数摘要命名。缓存按来源、参数和网格隔离。表单默认将缓存放在输出目录旁的 .imagery-cache 中。更换参数视为新任务。
+- 同名 TIFF、TFW、JSON 或原始 VRT 已存在时报告 OUTPUT_EXISTS，保留已有文件。不要自动删改或换名。CACHE_BUSY 表示相同缓存正在写入。
+- 网络故障和质检失败均不得报告下载成功。常规失败清理暂存成果，已通过检查的缓存分块可供相同参数重试。硬中断后如有残留或同名冲突，应报告具体路径，保留现场。
+- RGB 底图的下载分辨率与源影像原生分辨率分别说明。经纬度模式向外补齐不足一个像元的边缘。输出使用 DEFLATE 压缩和平铺 GeoTIFF，随附 TFW；不生成金字塔。

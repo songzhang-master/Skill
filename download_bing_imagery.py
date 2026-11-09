@@ -11,9 +11,10 @@ import urllib.request
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+from imagery_sources import BING_TEMPLATE, open_source
+
 from osgeo import gdal, osr
 
-DEFAULT_URL_TEMPLATE = "http://ecn.t3.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1"
 WEB_MERCATOR_HALF_WORLD = 20037508.342789244
 TILE_SIZE = 256
 
@@ -22,9 +23,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reference-raster", required=True, help="North-up EPSG:3857 reference GeoTIFF")
     parser.add_argument("--out", required=True, help="New aligned RGB GeoTIFF; existing files are refused")
+    parser.add_argument("--max-blocks", type=int, help="Optional limit on source blocks or tiles")
     parser.add_argument("--work-dir", required=True, help="Persistent cache directory for source JPEG tiles and VRT")
     parser.add_argument("--zoom", type=int, required=True, help="Bing tile zoom level (1-23)")
-    parser.add_argument("--url-template", default=DEFAULT_URL_TEMPLATE,
+    parser.add_argument("--url-template", default=BING_TEMPLATE, choices=[BING_TEMPLATE],
                         help="Tile URL template with {q}, {x}, {y}, and {z} placeholders")
     return parser.parse_args()
 
@@ -93,7 +95,9 @@ def download_tile(url: str, target: Path) -> None:
                 "User-Agent": "Codex-GIS/1.0",
                 "Accept": "image/jpeg",
             })
-            with urllib.request.urlopen(request, timeout=45) as response, partial.open("wb") as stream:
+            with open_source("bing", request, timeout=45) as response, partial.open("wb") as stream:
+                if "no-tile" in response.headers.get("X-VE-Tile-Info", "").lower():
+                    raise ValueError("Bing 标记此处没有影像瓦片。")
                 shutil.copyfileobj(response, stream)
             if not checked_tile(partial):
                 raise RuntimeError(f"Invalid 256x256 RGB tile: {url}")
@@ -116,6 +120,8 @@ def write_vrt(path: Path, tiles: list[tuple[Path, int, int]], cols: int, rows: i
         stream.write("  <GeoTransform>" + ", ".join(f"{v:.15g}" for v in gt) + "</GeoTransform>\n")
         for band in range(1, 4):
             stream.write(f'  <VRTRasterBand dataType="Byte" band="{band}">\n')
+            color = ("Red", "Green", "Blue")[band - 1]
+            stream.write(f"    <ColorInterp>{color}</ColorInterp>\n")
             for tile_path, xoff, yoff in tiles:
                 relative = Path(os.path.relpath(tile_path, path.parent)).as_posix()
                 stream.write("    <SimpleSource>\n")
@@ -161,6 +167,8 @@ def main() -> None:
     tile_root = work / "tiles" / "bing" / str(args.zoom)
     tiles: list[tuple[Path, int, int]] = []
     total = tile_cols * tile_rows
+    if args.max_blocks is not None and total > args.max_blocks:
+        raise ValueError(f"BLOCK_LIMIT：需要 {total} 块瓦片，上限为 {args.max_blocks}。")
     done = 0
     for row in range(row0, row1 + 1):
         for col in range(col0, col1 + 1):
@@ -193,7 +201,7 @@ def main() -> None:
         outputType=gdal.GDT_Byte,
         creationOptions=[
             "TILED=YES", "COMPRESS=DEFLATE", "PREDICTOR=2", "BIGTIFF=IF_SAFER",
-            "INTERLEAVE=PIXEL", "TFW=YES",
+            "INTERLEAVE=PIXEL", "PHOTOMETRIC=RGB", "TFW=YES",
         ],
     )
     result = gdal.Warp(str(out), str(vrt), options=options)
@@ -239,7 +247,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-

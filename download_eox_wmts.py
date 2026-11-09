@@ -14,10 +14,10 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+from imagery_sources import EOX_CAPABILITIES, open_source, EOX_DEFAULT_LAYER, cloudless_layer
+
 from osgeo import gdal, osr
 
-DEFAULT_CAPABILITIES = "https://tiles.maps.eox.at/wmts/1.0.0/WMTSCapabilities.xml"
-DEFAULT_LAYER = "s2cloudless-2025_3857"
 DEFAULT_MATRIX_SET = "GoogleMapsCompatible"
 WEB_MERCATOR_HALF_WORLD = 20037508.342789244
 
@@ -27,10 +27,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reference-raster", required=True, help="North-up EPSG:3857 reference GeoTIFF")
     parser.add_argument("--raw-vrt", required=True, help="New VRT on the selected native WMTS tile grid")
     parser.add_argument("--out", required=True, help="New reference-grid RGB GeoTIFF; existing files are refused")
+    parser.add_argument("--max-blocks", type=int, help="Optional limit on source blocks or tiles")
     parser.add_argument("--work-dir", required=True, help="Persistent cache directory for original JPEG WMTS tiles")
-    parser.add_argument("--capabilities-url", default=DEFAULT_CAPABILITIES, help="WMTS GetCapabilities URL")
-    parser.add_argument("--layer", default=DEFAULT_LAYER, help="Capabilities layer identifier")
-    parser.add_argument("--tile-matrix-set", default=DEFAULT_MATRIX_SET, help="Linked Web Mercator tile matrix set")
+    parser.add_argument("--capabilities-url", default=EOX_CAPABILITIES, choices=[EOX_CAPABILITIES], help="WMTS GetCapabilities URL")
+    parser.add_argument("--layer", default=EOX_DEFAULT_LAYER, type=cloudless_layer, help="Capabilities layer identifier")
+    parser.add_argument("--tile-matrix-set", default=DEFAULT_MATRIX_SET, choices=[DEFAULT_MATRIX_SET, 'g'], help="Linked Web Mercator tile matrix set")
     parser.add_argument("--zoom", type=int, default=13, help="TileMatrix identifier; default is 13")
     return parser.parse_args()
 
@@ -54,7 +55,7 @@ def child_text(element: ET.Element, name: str, required: bool = True) -> str | N
 
 def fetch_capabilities(url: str) -> ET.Element:
     request = urllib.request.Request(url, headers={"User-Agent": "Codex-GIS/1.0"})
-    with urllib.request.urlopen(request, timeout=60) as response:
+    with open_source("eox", request, timeout=60) as response:
         return ET.fromstring(response.read())
 
 
@@ -173,7 +174,7 @@ def download_tile(url: str, target: Path, width: int, height: int) -> None:
                 "User-Agent": "Codex-GIS/1.0",
                 "Accept": "image/jpeg",
             })
-            with urllib.request.urlopen(request, timeout=90) as response, partial.open("wb") as stream:
+            with open_source("eox", request, timeout=90) as response, partial.open("wb") as stream:
                 shutil.copyfileobj(response, stream)
             if not checked_tile(partial, width, height):
                 raise RuntimeError(f"Invalid JPEG WMTS tile: {url}")
@@ -196,6 +197,8 @@ def write_vrt(path: Path, tiles: list[tuple[Path, int, int]], cols: int, rows: i
         stream.write("  <GeoTransform>" + ", ".join(f"{v:.15g}" for v in gt) + "</GeoTransform>\n")
         for band in range(1, 4):
             stream.write(f'  <VRTRasterBand dataType="Byte" band="{band}">\n')
+            color = ("Red", "Green", "Blue")[band - 1]
+            stream.write(f"    <ColorInterp>{color}</ColorInterp>\n")
             for tile_path, xoff, yoff in tiles:
                 relative = Path(os.path.relpath(tile_path, path.parent)).as_posix()
                 stream.write("    <SimpleSource>\n")
@@ -253,6 +256,8 @@ def main() -> None:
     tiles: list[tuple[Path, int, int]] = []
     tile_root = work / "tiles" / args.layer / args.tile_matrix_set / str(args.zoom)
     total = tile_cols * tile_rows
+    if args.max_blocks is not None and total > args.max_blocks:
+        raise ValueError(f"BLOCK_LIMIT：需要 {total} 块瓦片，上限为 {args.max_blocks}。")
     done = 0
     for row in range(row0, row1 + 1):
         for col in range(col0, col1 + 1):
@@ -291,12 +296,15 @@ def main() -> None:
         outputType=gdal.GDT_Byte,
         creationOptions=[
             "TILED=YES", "COMPRESS=DEFLATE", "PREDICTOR=2", "BIGTIFF=IF_SAFER",
-            "INTERLEAVE=PIXEL", "TFW=YES",
+            "INTERLEAVE=PIXEL", "PHOTOMETRIC=RGB", "TFW=YES",
         ],
     )
     result = gdal.Warp(str(out), str(raw_vrt), options=warp_options)
     if result is None:
         raise RuntimeError("GDAL warp from WMTS VRT failed")
+    result.FlushCache()
+    result = None
+    result = gdal.Open(str(out))
     actual_gt = result.GetGeoTransform()
     gt_matches = all(math.isclose(a, b, rel_tol=1e-12, abs_tol=1e-9)
                      for a, b in zip(actual_gt, reference["gt"]))
